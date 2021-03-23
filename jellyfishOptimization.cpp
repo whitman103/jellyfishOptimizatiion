@@ -3,10 +3,12 @@
 #include <fstream>
 #include <tuple>
 #include <chrono>
+#include <functional>
 
 #include <boost/random/mersenne_twister.hpp>
 #include <boost/random/uniform_real.hpp>
 #include <boost/random/variate_generator.hpp>
+#include <boost/random/lognormal_distribution.hpp>
 
 #include "JellyfishClass.h"
 #include "pVavInteractions.h"
@@ -18,6 +20,8 @@ double cControl(double curTime, int maxIterations, double RNG){
 }
 vector<tuple<double,double> > pVavSetBounds(vector<double>& inSpeciesCounts,vector<double>& inTimes);
 int loadPvavInputs(vector<double>& speciesVector, vector<double>& initParameters, vector<double>&stoppingTimes, vector<tuple<double,double> >& bounds, string inFile);
+void loadCovariance(vector<double>& outMeans, vector<vector<double> >& inMatrix, string dataPath);
+
 
 
 int main(){
@@ -34,11 +38,15 @@ int main(){
 	boost::variate_generator<boost::mt19937, boost::uniform_real<double> > jellyfishRNG(jellyGenerator,standardUniform);
 
 
+
 	const int numParameters(6);
-	const int numJellyfish(50);
-	const int maxIterations(200);
+	const int numJellyfish(25);
+	const int maxIterations(100);
 	const int numSpecies(6);
-	const double deltaT(0.02);
+	const double deltaT(0.2);
+	const int numSamples(200);
+
+	const int numRuns(100);
 
 
 	vector<double> speciesVector(numSpecies,0);
@@ -55,86 +63,132 @@ int main(){
 	loadPvavInputs(speciesVector,initParameters,stoppingTimes,parameterBounds,"inputOne.txt");
 	resetVector=speciesVector;
 
+	vector<boost::mt19937> exNoiseEngines(3);
+	vector<boost::variate_generator<boost::mt19937, boost::lognormal_distribution<double> > > extrinsicNoiseGenerators;
+	vector<double> means;
+	vector<vector<double> > inValues;
+	loadCovariance(means, inValues,"outCov");
+	for(int i=0;i<(int)exNoiseEngines.size();i++){
+		exNoiseEngines[i].seed(time(NULL));
+		double scaledMean(means[i]);
+		double scaledSD(inValues[i][i]);
+		boost::lognormal_distribution<> currentTest(scaledMean,scaledSD);
+		boost::variate_generator<boost::mt19937,boost::lognormal_distribution<double> > createdEngine(exNoiseEngines[i],currentTest);
+		extrinsicNoiseGenerators.push_back(createdEngine);
+	}
+
 	const int numTimepoints(stoppingTimes.size()-1);
 
 	Jellyfish trueJellyfish=Jellyfish(initParameters,parameterBounds);
 	trueJellyfish.interactionFunctions=interactionPointers;
+
+	
 
 	vector<vector<double> > trueData(numTimepoints,vector<double> (numSpecies,0));
 	for(int stopTime=0;stopTime<numTimepoints;stopTime++){
 		pVav_RungeKutta(trueJellyfish,speciesVector,stoppingTimes[stopTime],stoppingTimes[stopTime+1],deltaT);
 		trueData[stopTime]=speciesVector;
 	}
-
-
-	vector<Jellyfish> jellyfishVector(numJellyfish);
-	for(int jellyfish=0;jellyfish<numJellyfish;jellyfish++){
-		vector<double> position(numParameters);
-		for(int i=0;i<(int)position.size();i++){
-			auto[lower,upper]=parameterBounds[i];
-			position[i]=lower+mainUniform()*(upper-lower);
-		}
-		jellyfishVector[jellyfish]=Jellyfish(position,parameterBounds);
-		jellyfishVector[jellyfish].interactionFunctions=interactionPointers;
+	bool extrinsicNoise(true);
+	string outFileName;
+	if(extrinsicNoise){
+		outFileName="extrinsicNoiseResults.txt";
 	}
-
-
-
- 	
-	for(int curTime=0;curTime<maxIterations;curTime++){
-
-		int minIndex(0);
-		double bestFitnessValue(1e13);
-		vector<double> meanPosition(numParameters,0);
-		vector<vector<double> > testData(numTimepoints,vector<double> (numSpecies,0));
-		for(int i=0;i<(int)jellyfishVector.size();i++){
-			speciesVector=resetVector;
-			for(int stopTime=0;stopTime<numTimepoints;stopTime++){
-				pVav_RungeKutta(jellyfishVector[i],speciesVector,stoppingTimes[stopTime],stoppingTimes[stopTime+1],deltaT);
-				testData[stopTime]=speciesVector;
-			}
-			jellyfishVector[i].currentFitnessValue=meanNoNoiseFitness(trueData,testData);
-			for(int j=0;j<(int)jellyfishVector[i].position.size();j++){
-				meanPosition[j]+=jellyfishVector[i].position[j]/jellyfishVector.size();
-			}
-		}
-
-		for(int i=0;i<(int)jellyfishVector.size();i++){
-			if(jellyfishVector[i].currentFitnessValue<bestFitnessValue){
-				minIndex=i;
-				bestFitnessValue=jellyfishVector[i].currentFitnessValue;
-			}
-		}
-		cout<<bestFitnessValue<<endl;
-
-		for(int i=0;i<(int)jellyfishVector.size();i++){
-			int alternateIndex(i);
-			do{
-				alternateIndex=generator()%jellyfishVector.size();
-			}while(alternateIndex==i);
-			jellyfishVector[i].motionControl=cControl(curTime,maxIterations,mainUniform());
-			if(i!=minIndex){
-				jellyfishVector[i].moveJellyfish(jellyfishVector[minIndex],meanPosition,jellyfishVector[alternateIndex],jellyfishRNG);
-			}
-		}
-		
+	else{
+		outFileName="deterministicResults.txt";
 	}
-
-	ofstream outFile("results.txt");
-
+	ofstream outFile(outFileName);
+	outFile<<0<<" ";
 	for(int i=0;i<(int)trueJellyfish.position.size();i++){
 		outFile<<trueJellyfish.position[i]<<" ";
 	}
 	outFile<<endl;
 
+	for(int curRun=0;curRun<numRuns;curRun++){
 
-	for(int i=0;i<(int)jellyfishVector.size();i++){
-		outFile<<jellyfishVector[i].currentFitnessValue<<" ";
-		for(int j=0;j<(int)jellyfishVector[i].position.size();j++){
-			outFile<<jellyfishVector[i].position[j]<<" ";
+		vector<Jellyfish> jellyfishVector(numJellyfish);
+		for(int jellyfish=0;jellyfish<numJellyfish;jellyfish++){
+			vector<double> position(numParameters);
+			for(int i=0;i<(int)position.size();i++){
+				auto[lower,upper]=parameterBounds[i];
+				position[i]=lower+mainUniform()*(upper-lower);
+			}
+			jellyfishVector[jellyfish]=Jellyfish(position,parameterBounds);
+			jellyfishVector[jellyfish].interactionFunctions=interactionPointers;
+		}
+
+
+		int minIndex(0);
+		for(int curTime=0;curTime<maxIterations;curTime++){
+
+			
+			double bestFitnessValue(1e13);
+			vector<double> meanPosition(numParameters,0);
+			vector<vector<double> > testData(numTimepoints,vector<double> (numSpecies,0));
+			for(int i=0;i<(int)jellyfishVector.size();i++){
+				if(extrinsicNoise){
+					for(int sample=0;sample<numSamples;sample++){
+						speciesVector=resetVector;
+						speciesVector[0]=extrinsicNoiseGenerators[0]();
+						speciesVector[1]=extrinsicNoiseGenerators[1]();
+						speciesVector[4]=extrinsicNoiseGenerators[2]();
+						for(int stopTime=0;stopTime<numTimepoints;stopTime++){
+							pVav_RungeKutta(jellyfishVector[i],speciesVector,stoppingTimes[stopTime],stoppingTimes[stopTime+1],deltaT);
+							for(int element=0;element<(int)speciesVector.size();element++){
+								testData[stopTime][element]+=speciesVector[element]/numSamples;
+							}
+						}
+					}
+					jellyfishVector[i].currentFitnessValue=meanNoNoiseFitness(trueData,testData);
+					for(int j=0;j<(int)jellyfishVector[i].position.size();j++){
+						meanPosition[j]+=jellyfishVector[i].position[j]/jellyfishVector.size();
+					}
+				}
+				else{
+					speciesVector=resetVector;
+					for(int stopTime=0;stopTime<numTimepoints;stopTime++){
+						pVav_RungeKutta(jellyfishVector[i],speciesVector,stoppingTimes[stopTime],stoppingTimes[stopTime+1],deltaT);
+						testData[stopTime]=speciesVector;
+					}
+					jellyfishVector[i].currentFitnessValue=meanNoNoiseFitness(trueData,testData);
+					for(int j=0;j<(int)jellyfishVector[i].position.size();j++){
+						meanPosition[j]+=jellyfishVector[i].position[j]/jellyfishVector.size();
+					}
+				}
+			}
+
+			for(int i=0;i<(int)jellyfishVector.size();i++){
+				if(jellyfishVector[i].currentFitnessValue<bestFitnessValue){
+					minIndex=i;
+					bestFitnessValue=jellyfishVector[i].currentFitnessValue;
+				}
+			}
+
+			for(int i=0;i<(int)jellyfishVector.size();i++){
+				int alternateIndex(i);
+				do{
+					alternateIndex=generator()%jellyfishVector.size();
+				}while(alternateIndex==i);
+				jellyfishVector[i].motionControl=cControl(curTime,maxIterations,mainUniform());
+				if(i!=minIndex){
+					jellyfishVector[i].moveJellyfish(jellyfishVector[minIndex],meanPosition,jellyfishVector[alternateIndex],jellyfishRNG);
+				}
+			}
+			
+		}
+
+		outFile<<jellyfishVector[minIndex].currentFitnessValue<<" ";
+		for(int i=0;i<(int)jellyfishVector[minIndex].position.size();i++){
+			outFile<<jellyfishVector[minIndex].position[i]<<" ";
 		}
 		outFile<<endl;
+
+
+
+
+
 	}
+
 	outFile.close();
 
 
@@ -213,4 +267,25 @@ vector<tuple<double,double> > pVavSetBounds(vector<double>& inSpeciesCounts,vect
 	outBounds[5]=make_tuple(k4Min,k4Max);
 
 	return outBounds;
+}
+
+void loadCovariance(vector<double>& outMeans, vector<vector<double> >& inMatrix, string dataPath){
+    int inSize(0);
+    ifstream inData(dataPath+".txt");
+	if(!inData.good()){
+		cout<<"failed to load data for covariance matrix"<<endl;
+	}
+    inData>>inSize;
+    outMeans.resize(inSize);
+    for(int i=0;i<inSize;i++){
+        inData>>outMeans[i];
+    }
+    vector<vector<double> > interMatrix(inSize,vector<double> (inSize,0));
+    for(int i=0;i<(int)interMatrix.size();i++){
+        for(int j=0;j<(int)interMatrix[i].size();j++){
+            inData>>interMatrix[i][j];
+        }
+    }
+    inData.close();
+    inMatrix=interMatrix;
 }

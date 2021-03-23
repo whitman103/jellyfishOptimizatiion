@@ -4,13 +4,16 @@ inFile=open("results.txt",'r')
 
 trueParams=inFile.readline()
 trueData=trueParams.split(" ")
-print(trueData)
+trueData.pop()
 
-paramHist=[]
+paramHist=[[] for i in range(len(trueData))]
 for line in inFile:
 	data=line.split(" ")
 	data.pop()
-	paramHist.append(float(data[0]))
+	for index,element in enumerate(data):
+		paramHist[index].append(float(element))
 
-plt.hist(paramHist,bins=20)
+fitnessValues=paramHist.pop(0)
+for index,element in enumerate(paramHist):
+	plt.scatter(element,[index for i in range(len(element))])
 plt.show()
